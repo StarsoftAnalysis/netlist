@@ -339,7 +339,7 @@ if ($opt{get} eq 'networks') {
 	my @compacted = NetAddr::IP::Compact(map {NetAddr::IP->new($_)} keys %list);
 	%list = ();
 	foreach my $net (@compacted) {
-		$list{lc($net)} = 1;
+		$list{lc($net->short())} = 1;
 	}
 }
 
