@@ -1,0 +1,349 @@
+#!/usr/bin/perl
+# vim:tabstop=4 softtabstop=4 shiftwidth=4 expandtab
+
+#########################################################################
+# netlist: returns information about the computer's network settings in #
+# a form designed to used be within a firewall script.                  #
+# Copyright (C) 2012 Chris Dennis, chris@starsoftanalysis.co.uk         #
+#                                                                       #
+# This program is free software: you can redistribute it and/or modify  #
+# it under the terms of the GNU General Public License as published by  #
+# the Free Software Foundation, either version 3 of the License, or     #
+# (at your option) any later version.                                   #
+#                                                                       #
+# This program is distributed in the hope that it will be useful,       #
+# but WITHOUT ANY WARRANTY; without even the implied warranty of        #
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         #
+# GNU General Public License for more details.                          #
+#                                                                       #
+# You should have received a copy of the GNU General Public License     #
+# along with this program.  If not, see <http://www.gnu.org/licenses/>. #
+#########################################################################
+
+# TODO:
+# - option to include /mask on addresses, or not on networks, or as separate item?
+
+use strict;
+use warnings;
+use 5.10.1;
+use Getopt::Long qw(:config ignore_case auto_abbrev);
+# Some versions of NetAddr::IP (e.g. Debian Squeeze's) don't
+# have the :lower option for NetAddr::IP, so I'll do the lower-case conversion myself.
+use NetAddr::IP;
+
+my %opt;
+
+sub debug ($) {
+	return if !$opt{debug};
+	print STDERR "dbg: @_";
+}
+
+sub usage {
+    print STDERR <<"EOD";
+Usage: $0 <options> <items>\n";
+Returns: a space separated list of items\n";
+\n<items> can be one of: addresses networks interfaces (which can be abbreviated.)
+With no options, all items are included in the list.
+Options can be used to restrict the list to items matching certain criteria.
+\nOptions:
+--up            - only (addresses/networks of) interfaces that are 'up' -- doesnt work
+--domain=<d>*   - one or more of: 'inet' aka 'ipv4' aka '4'; 'inet6' aka 'ipv6' aka 6; 'any'
+--4             - shortcut for '--domain 4'
+--6             - shortcut for '--domain 6'
+--scope=<s>*    - only items with the given scope
+                  <s> can be one or more of: host link global
+--interface=<i> - only items on the given interface
+                  (interfaces can be listed with '$0 interfaces')
+--type=<t>*     - only items of the given type
+                  <t> can be one or more of: loopback ether ...
+--debug         - turn on debugging information to STDERR
+--help          - disply this help message
+
+Options marked with * can be given more than once, or multiple values
+can be separated by commas, for example:  --interface eth0,wlan0
+Options can be abbreviated.
+EOD
+}
+
+# Defaults: unfiltered, so return lots
+$opt{up}        = undef;
+$opt{domain}    = [];		
+$opt{6}         = undef;
+$opt{4}         = undef;
+$opt{scope}     = [];
+$opt{interface} = [];
+$opt{type}      = [];	
+$opt{debug}     = 0;
+$opt{help}      = 0;
+my @GOarray = (
+	'up!',			# Up?   - default = undef i.e. either
+	'domain=s@',	# Domain: ipv4, ipv6, any  (later: arp...)  -- can have more than one   
+	'6!',			# Shortcut for domain=ipv6
+	'4!',			# Shortcut for domain=ipv4
+	'scope=s@',		# Scope - global, link, host
+	'interface=s@',	# Interface: eth0, lo, etc
+	'type=s@',		# Interface type: loopback, ether etc.
+	'debug!',
+    'help!',
+);
+{    
+	my $GOwarning = '';
+	local $SIG{__WARN__} = sub { $GOwarning = "@_"; };
+	my $GOok = GetOptions (\%opt, @GOarray);
+    if (!$GOok) {
+    	print STDERR "ERROR: $GOwarning\n";
+        usage();
+	    exit 1;  
+    }
+}    
+
+# Expand comma-separated multiple values
+foreach my $o (qw(domain interface scope type)) {
+    $opt{$o} = [split(/,/, join(',',@{$opt{$o}}))];
+}
+
+my $opterrors = 0;
+# Validate --domain and convert to 'inet' or 'inet6'
+# (which match the ip command output)
+if (!@{$opt{domain}} or 'any' ~~ $opt{domain}) {
+    $opt{domain} = ['inet', 'inet6'];
+} else {
+    $opt{validdomain} = [];
+    foreach my $d (@{$opt{domain}}) {
+        debug ("domain d=$d\n");
+        if (lc($d) ~~ ['inet', 'ip4', 'ipv4', '4']) {
+            push @{$opt{validdomain}}, 'inet';
+        } elsif (lc($d) ~~ ['inet6', 'ip6', 'ipv6', '6']) {
+            push @{$opt{validdomain}}, 'inet6';
+        } else {
+            print STDERR "Error: Invalid domain value: $d\n";
+            $opterrors += 1;
+        }
+    }
+    $opt{domain} = $opt{validdomain};
+    delete $opt{validdomain}
+}
+# It's ok if these produce duplicates:
+push @{$opt{domain}}, 'inet'  if $opt{4};
+push @{$opt{domain}}, 'inet6' if $opt{6};
+
+# TODO validate other options
+# - can't (usefully) specify domain when asking for interfaces
+
+exit 1 if ($opterrors > 0);
+
+if ($opt{help}) {
+    usage();
+    exit 1;
+}
+
+# Get the 'command', i.e. what type of thing to return.  Default: addresses
+my $get = lc(shift @ARGV // 'addresses');
+$opt{get} = 'addresses'  if 'addresses'  =~ /^$get/;
+$opt{get} = 'interfaces' if 'interfaces' =~ /^$get/;
+$opt{get} = 'networks'   if 'networks'   =~ /^$get/;
+if (!defined $opt{get}) {
+    #print STDERR "$0: invalid query '$get'\n";
+    print "Invalid command: $get\n";
+    usage();
+	exit 1;
+}
+
+foreach my $opt (sort keys %opt) {
+    if (ref($opt{$opt}) eq 'ARRAY') {
+        debug("$opt=@{$opt{$opt}}\n");
+    } else {
+    	debug("$opt=" . ($opt{$opt} // 'undef') . "\n");
+    }
+}
+
+# Example output from ip command: this is what our regexes have to match
+# $ ip -o a s
+# 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 16436 qdisc noqueue state UNKNOWN \    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+# 1: lo    inet 127.0.0.1/8 scope host lo
+# 1: lo    inet6 ::1/128 scope host \       valid_lft forever preferred_lft forever
+# 2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP qlen 1000\    link/ether 00:16:3e:14:ae:ff brd ff:ff:ff:ff:ff:ff
+# 2: eth0    inet 85.119.82.12/21 brd 85.119.87.255 scope global eth0
+# 2: eth0    inet 212.13.194.12/24 brd 212.13.194.255 scope global eth0:1
+# 2: eth0    inet6 2001:db8:0:1:0:1/64 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 2001:db8::3:2/64 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 2001:db8::3:1/64 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 2001:db8::2:1/64 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 2001:db8::2:2/64 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 2001:db8::1:2/64 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 2001:db8::1:1/64 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 2001:db8::3/64 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 2001:db8::9/128 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 2001:db8::2/64 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 fe80::216:3eff:fe14:aeff/64 scope link \       valid_lft forever preferred_lft forever
+# or
+# $ ip -o a s 
+# 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 16436 qdisc noqueue state UNKNOWN \    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+# 1: lo    inet 127.0.0.1/8 scope host lo
+# 1: lo    inet6 ::1/128 scope host \       valid_lft forever preferred_lft forever
+# 2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UNKNOWN qlen 1000\    link/ether 00:1d:92:3f:7a:cb brd ff:ff:ff:ff:ff:ff
+# 2: eth0    inet 192.168.1.198/24 brd 192.168.1.255 scope global eth0
+# 2: eth0    inet6 2001:db8::1/128 scope global \       valid_lft forever preferred_lft forever
+# 2: eth0    inet6 fe80::a:b:c:d/64 scope link \       valid_lft forever preferred_lft forever
+# 3: sit0: <NOARP> mtu 1480 qdisc noop state DOWN \    link/sit 0.0.0.0 brd 0.0.0.0
+# 9: he-ipv6: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1480 qdisc noqueue state UNKNOWN \    link/sit 192.168.1.198 peer 216.66.84.42
+# 9: he-ipv6    inet6 2001:db8::2/64 scope global \       valid_lft forever preferred_lft forever
+# 9: he-ipv6    inet6 fe80::1:2:3:4/128 scope link \       valid_lft forever preferred_lft forever
+#
+
+
+# Get the list of address information lines from the 'ip' command
+my @iplist = `ip --oneline address show`;
+my $rc = $?;
+if ($rc) {
+	print STDERR "Error running 'ip' command: rc=$rc\n";
+	exit 1;
+}
+debug("@iplist\n");
+# TODO check rc
+
+# Collect a list of things, filtered as required
+# as a hash rather than an array to avoid duplicates
+my %list;	
+
+# $up and $type and read from the interface line, and stay until the next one
+my $up;	
+my $type;
+foreach my $ipline (@iplist) {
+	debug("line: $ipline");
+	if ($ipline =~ m| 
+		(?'num'\d+):\s+
+		(?'iface'\S+):\s+
+		(?'flags'<.*>)\s+
+		.*	
+		\\\s+
+		link/(?'type'\S+)\s+
+		# more stuff
+		|x) 
+	{
+		my $num   = $+{num};
+		my $iface = $+{iface};
+		my $flags = $+{flags};
+		$type  = $+{type};
+        debug ("num=$num iface=$iface flags=$flags type=$type\n");
+		# It's a 'heading' line introducing a new interface
+		$up = 0;
+		if ($flags =~ /[<,]UP[,>]/) {	# TODO what does DOWN look like?
+			$up = 1;
+			debug("it's UP!\n");
+		}
+		if ($opt{get} eq 'interfaces') {
+			# Add matching network
+			if (
+				(   # up or down
+					(!defined $opt{up}       ) or
+					($opt{up} and $up eq 'UP')
+				)
+					and
+				(   # interface type
+					(!@{$opt{type}}     ) or
+					($type ~~ $opt{type})
+				)
+			) {
+				debug("adding interface $iface\n");
+				$list{$iface} = 1;
+			} else {
+				debug("skipping interface $iface\n");
+			}
+		} 
+	} elsif ($ipline =~ m|
+		(?'num'\d+):\s+
+		(?'iface'\S+)\s+
+		(?'domain'\S+)\s+
+		(?'addr'[^/]+)/(?'len'\d+)\s+
+		(
+		brd\s+(?'brd'\S+)\s+
+		)?
+		scope\s+(?'scope'\S+)\s+
+		(
+		\g{iface}:(?'virtual'\d+)\s+
+		)?
+		(
+		\\\s+
+		valid_lft\s+(?'validlft'\S+)\s+
+		preferred_lft\s+(?'preflft'\S+)
+		)?
+		|x) 
+	{
+		# It's an interface address line.
+		# Copy captures into local variables for convenience
+		my $num      = $+{num};
+		my $iface    = $+{iface};
+		my $domain   = $+{domain};
+		my $addr     = $+{addr};
+		my $len      = $+{len};
+		my $brd      = $+{brd} // '';
+		my $scope    = $+{scope};
+		my $virtual  = $+{virtual} // '';
+		my $validlft = $+{validlft} // '';
+		my $preflft  = $+{preflft}  // '';
+		debug("num=$+{num} iface=$+{iface} domain=$+{domain} addr=$+{addr}/$+{len} brd=$brd scope=$+{scope} virtual=$+{iface}:$virtual validlft=$validlft preflft=$preflft\n");
+		if ($opt{get} eq 'addresses' or $opt{get} eq 'networks') {
+
+			if (
+				(   # domain
+                    $domain ~~ $opt{domain}
+                    #($opt{domain} eq 'any') or
+                    #($opt{domain} eq $domain) or
+                    #(defined $opt{4} and $opt{4}=1 and $domain eq 'inet') or
+                    #(defined $opt{6} and $opt{6}=1 and $domain eq 'inet6')
+				) 
+					and 
+				(   # scope
+					(!@{$opt{scope}}      ) or
+					($scope ~~ $opt{scope})
+				)
+					and
+				(   # interface
+					(!@{$opt{interface}}      ) or
+					($iface ~~ $opt{interface})
+				)
+					and
+				(   # interface type
+					(!@{$opt{type}}     ) or
+					($type ~~ $opt{type})
+				)
+					and
+				(   # up or down
+					(!defined $opt{up}) or
+					(defined $opt{up} and $opt{up} == $up)
+				)
+			) {
+				# didn't get filtered out -- add it to the list
+				if ($opt{get} eq 'addresses') {
+					debug("adding addr $addr\n");
+					$list{$addr} = $len; # in case it's needed...
+				} else {
+					my $ipobject = NetAddr::IP->new($addr, $len);
+					my $network = lc($ipobject->network());
+					debug("adding network $network\n");
+					$list{$network} = 1;
+				}
+			} else {
+				debug("skipping addr/net ${addr}[/${len}]\n");
+			}
+		}
+	} else {
+		debug("no match\n");
+	}
+}
+
+if ($opt{get} eq 'networks') {
+	# Compact the list of networks to remove overlaps
+	debug("uncompacted $opt{get}: " . join(' ', map {$_} sort keys %list) . "\n");
+	my @compacted = NetAddr::IP::Compact(map {NetAddr::IP->new($_)} keys %list);
+	%list = ();
+	foreach my $net (@compacted) {
+		$list{lc($net)} = 1;
+	}
+}
+
+debug("returning $opt{get}: " . join(' ', map {$_} sort keys %list) . "\n");
+print join(' ', map {$_} sort keys %list) . "\n";
+
+
