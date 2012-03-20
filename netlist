@@ -103,6 +103,10 @@ foreach my $o (qw(domain interface scope type)) {
 }
 
 my $opterrors = 0;
+
+# It's ok if these produce duplicates:
+push @{$opt{domain}}, 'inet'  if $opt{4};
+push @{$opt{domain}}, 'inet6' if $opt{6};
 # Validate --domain and convert to 'inet' or 'inet6'
 # (which match the ip command output)
 if (!@{$opt{domain}} or 'any' ~~ $opt{domain}) {
@@ -123,9 +127,6 @@ if (!@{$opt{domain}} or 'any' ~~ $opt{domain}) {
     $opt{domain} = $opt{validdomain};
     delete $opt{validdomain}
 }
-# It's ok if these produce duplicates:
-push @{$opt{domain}}, 'inet'  if $opt{4};
-push @{$opt{domain}}, 'inet6' if $opt{6};
 
 # TODO validate other options
 # - can't (usefully) specify domain when asking for interfaces
@@ -190,7 +191,6 @@ foreach my $opt (sort keys %opt) {
 # 9: he-ipv6    inet6 2001:db8::2/64 scope global \       valid_lft forever preferred_lft forever
 # 9: he-ipv6    inet6 fe80::1:2:3:4/128 scope link \       valid_lft forever preferred_lft forever
 #
-
 
 # Get the list of address information lines from the 'ip' command
 my @iplist = `ip --oneline address show`;
@@ -339,7 +339,7 @@ if ($opt{get} eq 'networks') {
 	my @compacted = NetAddr::IP::Compact(map {NetAddr::IP->new($_)} keys %list);
 	%list = ();
 	foreach my $net (@compacted) {
-		$list{lc($net->short())} = 1;
+		$list{lc($net->short()."/".$net->masklen())} = 1;
 	}
 }
 
